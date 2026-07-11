@@ -4,7 +4,7 @@ import {
   extractFieldKeys,
   fetchLeadsPage,
   extractLeads,
-  extractPaginationId,
+  findPagination,
 } from "../../../lib/meritto";
  
 export const dynamic = "force-dynamic";
@@ -37,7 +37,7 @@ export async function GET() {
         {
           ok: false,
           step: "getMetaData",
-          hint: "No field_key values found. Visit /api/fields to inspect the raw response shape.",
+          hint: "No field_key values found. Visit /api/fields to inspect the raw response.",
           sample: meta,
         },
         { status: 502 }
@@ -48,6 +48,8 @@ export async function GET() {
     const fromDate = now - 48 * 60 * 60;
  
     let paginationId = null;
+    let paginationKey = null;
+    const seenPaginationIds = new Set();
     let page = 0;
     let totalSaved = 0;
     const pageNotes = [];
@@ -60,16 +62,17 @@ export async function GET() {
         fromDate,
         toDate: now,
         paginationId,
+        paginationKey,
       });
  
       const leads = extractLeads(listJson);
-      paginationId = extractPaginationId(listJson);
+      const pagination = findPagination(listJson);
  
       if (leads.length === 0 && page === 1) {
         rawDebug = listJson;
         pageNotes.push({
           page,
-          note: "No leads array found; raw response attached below as rawDebug.",
+          note: "No leads found; raw response attached as rawDebug.",
         });
         break;
       }
@@ -87,10 +90,26 @@ export async function GET() {
  
         if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
         totalSaved += rows.length;
-        pageNotes.push({ page, saved: rows.length });
       }
  
-      if (leads.length < 100) paginationId = null;
+      pageNotes.push({
+        page,
+        saved: leads.length,
+        paginationKeyFound: pagination.key,
+        hasNextTicket: Boolean(pagination.id),
+      });
+ 
+      if (
+        pagination.id &&
+        leads.length === 100 &&
+        !seenPaginationIds.has(String(pagination.id))
+      ) {
+        seenPaginationIds.add(String(pagination.id));
+        paginationId = pagination.id;
+        paginationKey = pagination.key;
+      } else {
+        paginationId = null;
+      }
     } while (paginationId && page < 50);
  
     return Response.json({
