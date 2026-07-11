@@ -4,7 +4,6 @@ import {
   extractFieldKeys,
   fetchLeadsPage,
   extractLeads,
-  findPagination,
 } from "../../../lib/meritto";
  
 export const dynamic = "force-dynamic";
@@ -45,36 +44,45 @@ export async function GET() {
     }
  
     const now = Math.floor(Date.now() / 1000);
-    const fromDate = now - 48 * 60 * 60;
+    const windows = [[now - 48 * 60 * 60, now]];
  
-    let paginationId = null;
-    let paginationKey = null;
     const seenLeadIds = new Set();
-    let page = 0;
+    let requestsMade = 0;
     let totalSaved = 0;
-    const pageNotes = [];
+    let splits = 0;
+    const notes = [];
     let rawDebug = null;
  
-    do {
-      page += 1;
+    while (windows.length > 0 && requestsMade < 40) {
+      const [from, to] = windows.pop();
+      requestsMade += 1;
+ 
       const listJson = await fetchLeadsPage({
         fields,
-        fromDate,
-        toDate: now,
-        paginationId,
-        paginationKey,
+        fromDate: from,
+        toDate: to,
       });
  
       const leads = extractLeads(listJson);
-      const pagination = findPagination(listJson);
  
-      if (leads.length === 0 && page === 1) {
+      if (leads.length === 0 && requestsMade === 1) {
         rawDebug = listJson;
-        pageNotes.push({
-          page,
-          note: "No leads found; raw response attached as rawDebug.",
+      }
+ 
+      const isFullBasket = leads.length === 100;
+      const windowSeconds = to - from;
+ 
+      if (isFullBasket && windowSeconds > 120) {
+        const mid = Math.floor((from + to) / 2);
+        windows.push([from, mid]);
+        windows.push([mid, to]);
+        splits += 1;
+        notes.push({
+          window: `${new Date(from * 1000).toISOString()} → ${new Date(to * 1000).toISOString()}`,
+          received: leads.length,
+          action: "full basket — split in half",
         });
-        break;
+        continue;
       }
  
       const freshLeads = leads.filter(
@@ -99,31 +107,23 @@ export async function GET() {
         totalSaved += rows.length;
       }
  
-      pageNotes.push({
-        page,
+      notes.push({
+        window: `${new Date(from * 1000).toISOString()} → ${new Date(to * 1000).toISOString()}`,
         received: leads.length,
         fresh: freshLeads.length,
-        paginationKeyFound: pagination.key,
-        paginationValue: pagination.id ? String(pagination.id).slice(0, 60) : null,
+        action: "saved",
       });
- 
-      const wholePageRepeated = leads.length > 0 && freshLeads.length === 0;
- 
-      if (pagination.id && leads.length === 100 && !wholePageRepeated) {
-        paginationId = pagination.id;
-        paginationKey = pagination.key;
-      } else {
-        paginationId = null;
-      }
-    } while (paginationId && page < 50);
+    }
  
     return Response.json({
       ok: true,
       startedAt,
       fieldsDiscovered: fields.length,
-      pagesFetched: page,
+      requestsMade,
+      windowsSplit: splits,
       leadsSaved: totalSaved,
-      pageNotes,
+      uniqueLeadsSeen: seenLeadIds.size,
+      notes,
       rawDebug,
     });
   } catch (err) {
