@@ -49,7 +49,7 @@ export async function GET() {
  
     let paginationId = null;
     let paginationKey = null;
-    const seenPaginationIds = new Set();
+    const seenLeadIds = new Set();
     let page = 0;
     let totalSaved = 0;
     const pageNotes = [];
@@ -77,8 +77,15 @@ export async function GET() {
         break;
       }
  
-      if (leads.length > 0) {
-        const rows = leads.map((lead) => ({
+      const freshLeads = leads.filter(
+        (lead) => !seenLeadIds.has(String(leadIdentity(lead)))
+      );
+      freshLeads.forEach((lead) =>
+        seenLeadIds.add(String(leadIdentity(lead)))
+      );
+ 
+      if (freshLeads.length > 0) {
+        const rows = freshLeads.map((lead) => ({
           lead_id: String(leadIdentity(lead)),
           data: lead,
           synced_at: new Date().toISOString(),
@@ -94,17 +101,15 @@ export async function GET() {
  
       pageNotes.push({
         page,
-        saved: leads.length,
+        received: leads.length,
+        fresh: freshLeads.length,
         paginationKeyFound: pagination.key,
-        hasNextTicket: Boolean(pagination.id),
+        paginationValue: pagination.id ? String(pagination.id).slice(0, 60) : null,
       });
  
-      if (
-        pagination.id &&
-        leads.length === 100 &&
-        !seenPaginationIds.has(String(pagination.id))
-      ) {
-        seenPaginationIds.add(String(pagination.id));
+      const wholePageRepeated = leads.length > 0 && freshLeads.length === 0;
+ 
+      if (pagination.id && leads.length === 100 && !wholePageRepeated) {
         paginationId = pagination.id;
         paginationKey = pagination.key;
       } else {
