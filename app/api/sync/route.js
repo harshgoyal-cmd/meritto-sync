@@ -21,11 +21,11 @@ function leadIdentity(lead) {
   );
 }
  
-function numericDates(leads) {
-  return leads
+function oldestDate(leads) {
+  const dates = leads
     .map((l) => Number(l.user_registration_date || l.user_date || 0))
-    .filter((n) => Number.isFinite(n) && n > 0)
-    .sort((a, b) => a - b);
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return dates.length ? Math.min(...dates) : null;
 }
  
 export async function GET() {
@@ -45,13 +45,34 @@ export async function GET() {
       );
     }
  
-    const supaSave = async (leads, seen) => {
-      const fresh = leads.filter(
-        (lead) => !seen.has(String(leadIdentity(lead)))
+    const now = Math.floor(Date.now() / 1000);
+    const fromDate = now - 48 * 60 * 60;
+ 
+    const seenLeadIds = new Set();
+    let cursor = now;
+    let requestsMade = 0;
+    let totalSaved = 0;
+    const steps = [];
+ 
+    while (requestsMade < 40) {
+      requestsMade += 1;
+ 
+      const listJson = await fetchLeadsPage({
+        fields,
+        fromDate,
+        toDate: cursor,
+      });
+      const leads = extractLeads(listJson);
+ 
+      const freshLeads = leads.filter(
+        (lead) => !seenLeadIds.has(String(leadIdentity(lead)))
       );
-      fresh.forEach((lead) => seen.add(String(leadIdentity(lead))));
-      if (fresh.length > 0) {
-        const rows = fresh.map((lead) => ({
+      freshLeads.forEach((lead) =>
+        seenLeadIds.add(String(leadIdentity(lead)))
+      );
+ 
+      if (freshLeads.length > 0) {
+        const rows = freshLeads.map((lead) => ({
           lead_id: String(leadIdentity(lead)),
           data: lead,
           synced_at: new Date().toISOString(),
@@ -60,98 +81,29 @@ export async function GET() {
           .from("merito_leads")
           .upsert(rows, { onConflict: "lead_id" });
         if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
+        totalSaved += rows.length;
       }
-      return fresh.length;
-    };
  
-    const now = Math.floor(Date.now() / 1000);
-    const from48 = now - 48 * 60 * 60;
- 
-    const seenLeadIds = new Set();
-    let totalSaved = 0;
-    const notes = [];
- 
-    const mainResponse = await fetchLeadsPage({
-      fields,
-      fromDate: from48,
-      toDate: now,
-    });
-    const mainLeads = extractLeads(mainResponse);
-    totalSaved += await supaSave(mainLeads, seenLeadIds);
-    const mainDates = numericDates(mainLeads);
- 
-    notes.push({
-      request: "main window (48h → now)",
-      merittoCode: mainResponse?.code,
-      merittoMessage: mainResponse?.message,
-      received: mainLeads.length,
-      oldestLead: mainDates[0] || null,
-      newestLead: mainDates[mainDates.length - 1] || null,
-    });
- 
-    let walkProbeWorks = false;
- 
-    if (mainLeads.length === 100 && mainDates.length > 0) {
-      const oldestSeen = mainDates[0];
- 
-      const probeResponse = await fetchLeadsPage({
-        fields,
-        fromDate: from48,
-        toDate: oldestSeen - 1,
-      });
-      const probeLeads = extractLeads(probeResponse);
-      const probeDates = numericDates(probeLeads);
-      const probeFresh = await supaSave(probeLeads, seenLeadIds);
-      totalSaved += probeFresh;
- 
-      walkProbeWorks = probeFresh > 0;
- 
-      notes.push({
-        request: `walk probe (48h → ${oldestSeen - 1}, i.e. older than oldest seen)`,
-        merittoCode: probeResponse?.code,
-        merittoMessage: probeResponse?.message,
-        received: probeLeads.length,
-        fresh: probeFresh,
-        oldestLead: probeDates[0] || null,
-        newestLead: probeDates[probeDates.length - 1] || null,
+      steps.push({
+        step: requestsMade,
+        received: leads.length,
+        fresh: freshLeads.length,
       });
  
-      const half = Math.floor((from48 + now) / 2);
-      const halfResponse = await fetchLeadsPage({
-        fields,
-        fromDate: half,
-        toDate: now,
-      });
-      const halfLeads = extractLeads(halfResponse);
-      notes.push({
-        request: "diagnostic half window (24h → now)",
-        merittoCode: halfResponse?.code,
-        merittoMessage: halfResponse?.message,
-        received: halfLeads.length,
-      });
+      const oldest = oldestDate(leads);
  
-      const pastResponse = await fetchLeadsPage({
-        fromDate: from48,
-        toDate: now - 12 * 60 * 60,
-        fields,
-      });
-      const pastLeads = extractLeads(pastResponse);
-      notes.push({
-        request: "diagnostic past-to_date window (48h → 12h ago)",
-        merittoCode: pastResponse?.code,
-        merittoMessage: pastResponse?.message,
-        received: pastLeads.length,
-      });
+      if (leads.length < 100 || !oldest || freshLeads.length === 0) break;
+      cursor = oldest - 1;
+      if (cursor <= fromDate) break;
     }
  
     return Response.json({
       ok: true,
       startedAt,
-      fieldsDiscovered: fields.length,
+      requestsMade,
       leadsSaved: totalSaved,
       uniqueLeadsSeen: seenLeadIds.size,
-      walkProbeWorks,
-      notes,
+      steps,
     });
   } catch (err) {
     return Response.json(
