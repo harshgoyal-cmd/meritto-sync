@@ -21,6 +21,18 @@ function leadIdentity(lead) {
   );
 }
  
+function dateSpan(leads) {
+  const dates = leads
+    .map(
+      (l) =>
+        l.user_registration_date || l.user_date || l.created_at || l.date || null
+    )
+    .filter(Boolean)
+    .sort();
+  if (dates.length === 0) return { earliest: null, latest: null };
+  return { earliest: dates[0], latest: dates[dates.length - 1] };
+}
+ 
 export async function GET() {
   const startedAt = new Date().toISOString();
   try {
@@ -33,12 +45,7 @@ export async function GET() {
     const fields = extractFieldKeys(meta);
     if (fields.length === 0) {
       return Response.json(
-        {
-          ok: false,
-          step: "getMetaData",
-          hint: "No field_key values found. Visit /api/fields to inspect the raw response.",
-          sample: meta,
-        },
+        { ok: false, step: "getMetaData", sample: meta },
         { status: 502 }
       );
     }
@@ -51,7 +58,6 @@ export async function GET() {
     let totalSaved = 0;
     let splits = 0;
     const notes = [];
-    let rawDebug = null;
  
     while (windows.length > 0 && requestsMade < 40) {
       const [from, to] = windows.pop();
@@ -64,26 +70,6 @@ export async function GET() {
       });
  
       const leads = extractLeads(listJson);
- 
-      if (leads.length === 0 && requestsMade === 1) {
-        rawDebug = listJson;
-      }
- 
-      const isFullBasket = leads.length === 100;
-      const windowSeconds = to - from;
- 
-      if (isFullBasket && windowSeconds > 120) {
-        const mid = Math.floor((from + to) / 2);
-        windows.push([from, mid]);
-        windows.push([mid, to]);
-        splits += 1;
-        notes.push({
-          window: `${new Date(from * 1000).toISOString()} → ${new Date(to * 1000).toISOString()}`,
-          received: leads.length,
-          action: "full basket — split in half",
-        });
-        continue;
-      }
  
       const freshLeads = leads.filter(
         (lead) => !seenLeadIds.has(String(leadIdentity(lead)))
@@ -107,12 +93,27 @@ export async function GET() {
         totalSaved += rows.length;
       }
  
+      const span = dateSpan(leads);
+      const isFullBasket = leads.length === 100;
+      const windowSeconds = to - from;
+ 
       notes.push({
-        window: `${new Date(from * 1000).toISOString()} → ${new Date(to * 1000).toISOString()}`,
+        askedFor: `${new Date(from * 1000).toISOString()} → ${new Date(to * 1000).toISOString()}`,
         received: leads.length,
         fresh: freshLeads.length,
-        action: "saved",
+        actualLeadDates: `${span.earliest} → ${span.latest}`,
+        action:
+          isFullBasket && windowSeconds > 120
+            ? "saved, then split for more"
+            : "saved",
       });
+ 
+      if (isFullBasket && windowSeconds > 120) {
+        const mid = Math.floor((from + to) / 2);
+        windows.push([from, mid]);
+        windows.push([mid, to]);
+        splits += 1;
+      }
     }
  
     return Response.json({
@@ -124,7 +125,6 @@ export async function GET() {
       leadsSaved: totalSaved,
       uniqueLeadsSeen: seenLeadIds.size,
       notes,
-      rawDebug,
     });
   } catch (err) {
     return Response.json(
