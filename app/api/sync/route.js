@@ -6,10 +6,10 @@ import {
   extractLeads,
   extractPaginationId,
 } from "../../../lib/meritto";
-
+ 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
+ 
 function leadIdentity(lead) {
   return (
     lead.lead_id ||
@@ -21,7 +21,7 @@ function leadIdentity(lead) {
     JSON.stringify(lead)
   );
 }
-
+ 
 export async function GET() {
   const startedAt = new Date().toISOString();
   try {
@@ -29,7 +29,7 @@ export async function GET() {
       process.env.SUPABASE_URL,
       process.env.SUPABASE_SERVICE_ROLE_KEY
     );
-
+ 
     const meta = await getLeadFields();
     const fields = extractFieldKeys(meta);
     if (fields.length === 0) {
@@ -43,15 +43,16 @@ export async function GET() {
         { status: 502 }
       );
     }
-
+ 
     const now = Math.floor(Date.now() / 1000);
     const fromDate = now - 48 * 60 * 60;
-
+ 
     let paginationId = null;
     let page = 0;
     let totalSaved = 0;
     const pageNotes = [];
-
+    let rawDebug = null;
+ 
     do {
       page += 1;
       const listJson = await fetchLeadsPage({
@@ -60,38 +61,38 @@ export async function GET() {
         toDate: now,
         paginationId,
       });
-
+ 
       const leads = extractLeads(listJson);
       paginationId = extractPaginationId(listJson);
-
+ 
       if (leads.length === 0 && page === 1) {
+        rawDebug = listJson;
         pageNotes.push({
           page,
-          note: "No leads array found in response; raw shape attached.",
-          shape: Object.keys(listJson?.data || listJson || {}),
+          note: "No leads array found; raw response attached below as rawDebug.",
         });
         break;
       }
-
+ 
       if (leads.length > 0) {
         const rows = leads.map((lead) => ({
           lead_id: String(leadIdentity(lead)),
           data: lead,
           synced_at: new Date().toISOString(),
         }));
-
+ 
         const { error } = await supabase
           .from("merito_leads")
           .upsert(rows, { onConflict: "lead_id" });
-
+ 
         if (error) throw new Error(`Supabase upsert failed: ${error.message}`);
         totalSaved += rows.length;
         pageNotes.push({ page, saved: rows.length });
       }
-
+ 
       if (leads.length < 100) paginationId = null;
     } while (paginationId && page < 50);
-
+ 
     return Response.json({
       ok: true,
       startedAt,
@@ -99,6 +100,7 @@ export async function GET() {
       pagesFetched: page,
       leadsSaved: totalSaved,
       pageNotes,
+      rawDebug,
     });
   } catch (err) {
     return Response.json(
